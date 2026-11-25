@@ -1,0 +1,37 @@
+name = "hazel-indofinity"
+main = "lib/index.js"
+compatibility_date = "2026-11-23"
+
+# Also reachable at https://hazel-indofinity.<your-subdomain>.workers.dev,
+# which is handy for testing before the custom domain is switched over.
+workers_dev = true
+
+# Uncomment once updater.indofinity.com should be served by this Worker.
+# The indofinity.com zone must be on Cloudflare, and the existing DNS record
+# for "updater" (pointing to Vercel) must be deleted first.
+# routes = [
+#   { pattern = "updater.indofinity.com", custom_domain = true }
+# ]
+
+[vars]
+# GitHub user/org and repository holding the releases of the Electron app.
+# Use the same values as the ACCOUNT and REPOSITORY variables on Vercel.
+ACCOUNT = "CHANGE-ME"
+REPOSITORY = "CHANGE-ME"
+
+# Refresh the cached release every x minutes.
+INTERVAL = "15"
+
+# Set to "1" to serve pre-releases only.
+# PRE = "1"
+
+# Only needed in private repo mode (TOKEN set), when the public address
+# differs from the one requests arrive on. Defaults to the request's origin.
+# URL = "https://updater.indofinity.com"
+
+# Secrets are not stored in this file. Set them with:
+#   npx wrangler secret put TOKEN         (private repo: enables download proxying)
+#   npx wrangler secret put GITHUB_TOKEN  (public repo: only raises GitHub's rate limit)
+
+[observability]
+enabled = true

@@ -1,25 +1,34 @@
 # Hazel
 
-[![CircleCI](https://circleci.com/gh/vercel/hazel/tree/master.svg?style=svg)](https://circleci.com/gh/vercel/hazel/tree/master)
-[![XO code style](https://img.shields.io/badge/code_style-XO-5ed9c7.svg)](https://github.com/sindresorhus/xo)
+This project lets you deploy an update server for [Electron](https://www.electronjs.org) apps with ease.
 
-This project lets you deploy an update server for [Electron](https://www.electronjs.org) apps with ease: You only need to click a button.
-
-The result will be faster and more lightweight than any other solution out there! :rocket:
+This fork runs on [Cloudflare Workers](https://workers.cloudflare.com) instead of Vercel.
 
 - Recommended by Electron [here](https://www.electronjs.org/docs/tutorial/updates#deploying-an-update-server)
-- Built on top of [micro](https://github.com/zeit/micro), the tiniest HTTP framework for Node.js
-- Pulls the latest release data from [GitHub Releases](https://help.github.com/articles/creating-releases/) and caches it in memory
+- Pulls the latest release data from [GitHub Releases](https://help.github.com/articles/creating-releases/) and caches it in memory and in the [Cache API](https://developers.cloudflare.com/workers/runtime-apis/cache/) of each Cloudflare data center
 - Refreshes the cache every **15 minutes** (custom interval [possible](#options))
 - When asked for an update, it returns the link to the GitHub asset directly (saves bandwidth)
 - Supports **macOS** and **Windows** apps
-- Scales infinitely on [Vercel](https://vercel.com) Serverless Functions
+- If GitHub cannot be reached, keeps serving the release it cached last
 
 ## Usage
 
-Open this link in a new tab to deploy Hazel on [Vercel](https://vercel.com):
+1. Install the dependencies: `yarn`
+2. Set `ACCOUNT` and `REPOSITORY` in [`wrangler.toml`](wrangler.toml) to the GitHub user/org and repository that holds the releases of your Electron app.
+3. Log in to Cloudflare and deploy:
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/git/external?repository-url=https%3A%2F%2Fgithub.com%2Fvercel%2Fhazel&env=ACCOUNT,REPOSITORY&envDescription=Enter%20your%20GitHub%20user%2Forg%20slug%20and%20the%20name%20of%20the%20repository%20that%20contains%20your%20Electron%20app.&envLink=https%3A%2F%2Fgithub.com%2Fvercel%2Fhazel%23usage&repo-name=hazel-update-server)
+   ```sh
+   npx wrangler login
+   yarn deploy
+   ```
+
+4. Optional, but recommended for public repositories: GitHub only allows 60 unauthenticated API requests per hour per IP address, and Workers share their IP addresses. Add a token (a fine-grained token with read-only access to the repository's contents is enough) to get a higher limit:
+
+   ```sh
+   npx wrangler secret put GITHUB_TOKEN
+   ```
+
+5. To serve the Worker on your own domain (the domain must be on Cloudflare), uncomment `routes` in [`wrangler.toml`](wrangler.toml) and deploy again.
 
 Once it's deployed, paste the deployment address into your code (please keep in mind that updates should only occur in the production version of the app, not while developing):
 
@@ -38,12 +47,14 @@ From now on, the auto updater will ask your Hazel deployment for updates!
 
 ## Options
 
-The following environment variables can be used optionally:
+Variables are set in the `[vars]` section of [`wrangler.toml`](wrangler.toml), secrets with `npx wrangler secret put <NAME>`:
 
+- `ACCOUNT` and `REPOSITORY` (required): Where the releases of your app are published
 - `INTERVAL`: Refreshes the cache every x minutes ([restrictions](https://developer.github.com/changes/2012-10-14-rate-limit-changes/)) (defaults to 15 minutes)
 - `PRE`: When defined with a value of `1`, only pre-releases will be cached
-- `TOKEN`: Your GitHub token (for private repos)
-- `URL`: The server's URL (for private repos - when running on [Vercel](https://vercel.com), this field is filled with the URL of the deployment automatically)
+- `TOKEN` (secret): Your GitHub token (for private repos). Downloads are then sent through this server, which asks GitHub for a download link
+- `GITHUB_TOKEN` (secret): A GitHub token that is only used to raise the API rate limit, for public repos
+- `URL`: The server's public URL, used for download links in private repo mode (defaults to the address the request was sent to)
 
 ## Statistics
 
@@ -83,21 +94,26 @@ Since the [Windows version](https://github.com/Squirrel/Squirrel.Windows) of Squ
 
 ## Programmatic Usage
 
-You can add Hazel to an existing HTTP server, if you want. For example, this will allow you to implement custom analytics on certain paths.
+You can add Hazel to an existing Worker, if you want. For example, this will allow you to implement custom analytics on certain paths.
 
 ```js
-const hazel = require('hazel-server')
+import { createHandler } from './lib/index.js'
 
-http.createServer((req, res) => {
-  hazel(req, res)
-})
+const hazel = createHandler({ account: 'acme', repository: 'app' })
+
+export default {
+  fetch(request, env, ctx) {
+    return hazel(request, ctx)
+  }
+}
 ```
 
 ## Contributing
 
 1. [Fork](https://help.github.com/articles/fork-a-repo/) this repository to your own GitHub account and then [clone](https://help.github.com/articles/cloning-a-repository/) it to your local device
 2. Move into the directory of your clone: `cd hazel`
-3. Install [Vercel CLI](https://vercel.com/cli) and run the development server: `vercel dev`
+3. Install the dependencies with `yarn` and run the development server: `yarn dev`
+4. Run the tests: `yarn test`
 
 ## Credits
 

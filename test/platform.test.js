@@ -1,24 +1,29 @@
-/* global describe, it, expect */
-const platform = require('../lib/platform')
+import { describe, it } from 'node:test'
+import assert from 'node:assert/strict'
+import platform from '../lib/platform.js'
 
 describe('Platform', () => {
   it('Should parse mac', () => {
-    const result = platform('hyper-2.1.1-mac.zip')
-    expect(result).toBe('darwin')
+    assert.equal(platform('hyper-2.1.1-mac.zip'), 'darwin')
+  })
+
+  it('Should parse mac arm64', () => {
+    assert.equal(platform('hyper-2.1.1-arm64-mac.zip'), 'darwin_arm64')
   })
 
   it('Should parse other platforms', () => {
-    const result = platform('hyper_2.1.1_amd64.deb')
-    expect(result).toBe('deb')
+    assert.equal(platform('hyper_2.1.1_amd64.deb'), 'deb')
+    assert.equal(platform('Hyper-2.1.1.AppImage'), 'AppImage')
+    assert.equal(platform('Hyper Setup 2.1.1.exe'), 'exe')
   })
 
   it('Should parse dmg', () => {
-    const result = platform('hyper-2.1.1.dmg')
-    expect(result).toBe('dmg')
+    assert.equal(platform('hyper-2.1.1.dmg'), 'dmg')
   })
 
   it('Should return false for unknown files', () => {
-    const result = platform('hi.txt')
-    expect(result).toBe(false)
+    assert.equal(platform('hi.txt'), false)
+    assert.equal(platform('latest.yml'), false)
+    assert.equal(platform('.dmg'), false)
   })
 })

@@ -1,19 +1,22 @@
-/* global describe, it, expect */
-const aliases = require('../lib/aliases')
+import { describe, it } from 'node:test'
+import assert from 'node:assert/strict'
+import aliases from '../lib/aliases.js'
 
 describe('Aliases', () => {
   it('Should return the correct platform', () => {
-    const result = aliases('mac')
-    expect(result).toBe('darwin')
+    assert.equal(aliases('mac'), 'darwin')
   })
 
   it('Should return the platform when the platform is provided', () => {
-    const result = aliases('darwin')
-    expect(result).toBe('darwin')
+    assert.equal(aliases('darwin'), 'darwin')
+  })
+
+  it('Should return the arm64 platform', () => {
+    assert.equal(aliases('mac_arm64'), 'darwin_arm64')
+    assert.equal(aliases('dmg_arm64'), 'dmg_arm64')
   })
 
   it('Should return false if no platform is found', () => {
-    const result = aliases('test')
-    expect(result).toBe(false)
+    assert.equal(aliases('test'), false)
   })
 })
