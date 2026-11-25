@@ -16,8 +16,8 @@ workers_dev = true
 [vars]
 # GitHub user/org and repository holding the releases of the Electron app.
 # Use the same values as the ACCOUNT and REPOSITORY variables on Vercel.
-ACCOUNT = "CHANGE-ME"
-REPOSITORY = "CHANGE-ME"
+ACCOUNT = "dikifi"
+REPOSITORY = "indofinity"
 
 # Refresh the cached release every x minutes.
 INTERVAL = "15"
