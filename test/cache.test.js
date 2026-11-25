@@ -4,12 +4,15 @@ import Cache from '../lib/cache.js'
 import {
   ACCOUNT,
   REPOSITORY,
+  age,
+  captureErrors,
   mockGitHub,
   release,
   restoreFetch
 } from './helpers.js'
 
 const config = { account: ACCOUNT, repository: REPOSITORY, retryDelay: 0 }
+const MINUTE = 60 * 1000
 
 afterEach(restoreFetch)
 
@@ -33,6 +36,7 @@ describe('Cache', () => {
     assert.equal(storage.version, 'v1.2.0')
     assert.equal(storage.notes, 'Notes for v1.2.0')
     assert.equal(storage.pub_date, '2026-11-01T00:00:00Z')
+    assert.equal(storage.unavailable, undefined)
     assert.deepEqual(Object.keys(storage.platforms).sort(), [
       'darwin',
       'darwin_arm64',
@@ -49,6 +53,8 @@ describe('Cache', () => {
     // GitHub rejects API requests without a User-Agent.
     assert.equal(calls[0].init.headers['User-Agent'], 'hazel-update-server')
     assert.equal(calls[0].init.headers.Authorization, undefined)
+    // Requests to GitHub cannot hang.
+    assert.ok(calls[0].init.signal instanceof AbortSignal)
   })
 
   it('should point RELEASES to the full nupkg URL', async () => {
@@ -117,40 +123,178 @@ describe('Cache', () => {
     assert.equal(calls.length, callsAfterFirstLoad)
 
     state.releases = [release('v1.3.0'), ...state.releases]
-    cache.lastUpdate -= 16 * 60 * 1000
+    age(cache)
 
     assert.equal((await cache.loadCache()).version, 'v1.3.0')
   })
 
-  it('should keep serving the cached release when GitHub fails', async () => {
+  it('should refresh only once when requests arrive at the same time', async () => {
+    const state = {}
+    const calls = mockGitHub(state)
+    const cache = new Cache(config)
+
+    await cache.loadCache()
+    age(cache)
+    calls.length = 0
+    state.delay = 20
+
+    const results = await Promise.all([cache.loadCache(), cache.loadCache()])
+
+    assert.deepEqual(
+      results.map(result => result.version),
+      ['v1.2.0', 'v1.2.0']
+    )
+    assert.equal(calls.filter(call => call.url.includes('?per_page')).length, 1)
+  })
+})
+
+describe('Cache when GitHub fails', () => {
+  it('should not retry an expired token, and wait 15 minutes', async t => {
+    const errors = captureErrors(t)
+    const calls = mockGitHub({ status: 401 })
+    const cache = new Cache({ ...config, token: 'expired' })
+
+    const storage = await cache.loadCache()
+
+    assert.equal(calls.length, 1)
+    assert.equal(storage.version, undefined)
+    assert.equal(storage.unavailable.status, 401)
+    assert.ok(Math.abs(storage.unavailable.retryAfter - 15 * 60) <= 1)
+    assert.match(errors[0], /token: it has probably expired/)
+    assert.match(errors[0], /wrangler secret put TOKEN/)
+  })
+
+  it('should not contact GitHub again while waiting', async t => {
+    captureErrors(t)
+    const calls = mockGitHub({ status: 401 })
+    const cache = new Cache({ ...config, token: 'expired' })
+
+    for (let i = 0; i < 1000; i += 1) {
+      const storage = await cache.loadCache()
+      assert.ok(storage.unavailable)
+    }
+
+    assert.equal(calls.length, 1)
+  })
+
+  it('should try again after waiting, and recover', async t => {
+    captureErrors(t)
+    const state = { status: 401 }
+    const calls = mockGitHub(state)
+    const cache = new Cache({ ...config, token: 'expired' })
+
+    await cache.loadCache()
+    cache.failure.until = Date.now() - 1
+    delete state.status
+
+    const storage = await cache.loadCache()
+
+    assert.equal(storage.version, 'v1.2.0')
+    assert.equal(storage.unavailable, undefined)
+    assert.equal(cache.failure, null)
+    assert.ok(calls.length > 1)
+  })
+
+  it('should keep the release cached before the failure', async t => {
+    captureErrors(t)
     const state = {}
     mockGitHub(state)
     const cache = new Cache(config)
 
     await cache.loadCache()
-    cache.lastUpdate -= 16 * 60 * 1000
-    state.status = 403
+    age(cache)
+    state.status = 401
 
-    const originalError = console.error
-    console.error = () => {}
-
-    try {
-      assert.equal((await cache.loadCache()).version, 'v1.2.0')
-    } finally {
-      console.error = originalError
-    }
+    const storage = await cache.loadCache()
+    assert.equal(storage.version, 'v1.2.0')
+    assert.equal(storage.unavailable.status, 401)
   })
 
-  it('should throw when GitHub fails and nothing is cached yet', async () => {
+  it('should retry server errors twice, then wait a minute', async t => {
+    captureErrors(t)
     const calls = mockGitHub({ status: 503 })
     const cache = new Cache(config)
 
-    await assert.rejects(cache.loadCache(), /GitHub responded with 503/)
-    // The first try and three retries.
-    assert.equal(calls.length, 4)
+    const storage = await cache.loadCache()
 
-    // Afterwards, GitHub is left alone for a minute.
-    await assert.rejects(cache.loadCache(), /retrying in a minute/)
-    assert.equal(calls.length, 4)
+    assert.equal(calls.length, 3)
+    assert.ok(Math.abs(storage.unavailable.retryAfter - 60) <= 1)
+
+    await cache.loadCache()
+    assert.equal(calls.length, 3)
+  })
+
+  it('should wait until a rate limit is over', async t => {
+    captureErrors(t)
+    const reset = Math.floor((Date.now() + 30 * MINUTE) / 1000)
+    const calls = mockGitHub({
+      status: 403,
+      headers: {
+        'x-ratelimit-remaining': '0',
+        'x-ratelimit-reset': String(reset)
+      }
+    })
+
+    const storage = await new Cache(config).loadCache()
+
+    assert.equal(calls.length, 1)
+    assert.ok(Math.abs(storage.unavailable.retryAfter - 30 * 60) <= 2)
+  })
+
+  it('should follow Retry-After, but never wait longer than an hour', async t => {
+    captureErrors(t)
+    mockGitHub({ status: 429, headers: { 'Retry-After': '120' } })
+    let storage = await new Cache(config).loadCache()
+    assert.ok(Math.abs(storage.unavailable.retryAfter - 120) <= 1)
+
+    mockGitHub({ status: 429, headers: { 'Retry-After': '86400' } })
+    storage = await new Cache(config).loadCache()
+    assert.ok(Math.abs(storage.unavailable.retryAfter - 60 * 60) <= 1)
+  })
+
+  it('should treat network errors like server errors', async t => {
+    captureErrors(t)
+    let calls = 0
+    globalThis.fetch = async () => {
+      calls += 1
+      throw new TypeError('fetch failed')
+    }
+
+    const storage = await new Cache(config).loadCache()
+
+    assert.equal(calls, 3)
+    assert.equal(storage.unavailable.status, null)
+  })
+
+  it('should stop asking GitHub when a download link is refused', async t => {
+    captureErrors(t)
+    const state = {}
+    const calls = mockGitHub(state)
+    const cache = new Cache({ ...config, token: 'expired' })
+    const { platforms } = await cache.loadCache()
+
+    state.assetStatus = 401
+    const link = await cache.getDownloadLink(platforms.dmg)
+    assert.ok(Math.abs(link.retryAfter - 15 * 60) <= 1)
+
+    const callsAfterRefusal = calls.length
+    const storage = await cache.loadCache()
+    assert.equal(storage.unavailable.status, 401)
+    assert.equal(calls.length, callsAfterRefusal)
+  })
+
+  it('should hand out download links', async () => {
+    const calls = mockGitHub()
+    const cache = new Cache({ ...config, token: 'secret' })
+    const { platforms } = await cache.loadCache()
+
+    assert.deepEqual(await cache.getDownloadLink(platforms.dmg), {
+      location: 'https://objects.example.com/signed-download'
+    })
+
+    const assetCall = calls.at(-1)
+    assert.equal(assetCall.init.headers.Authorization, 'token secret')
+    assert.equal(assetCall.init.headers.Accept, 'application/octet-stream')
+    assert.equal(assetCall.init.redirect, 'manual')
   })
 })

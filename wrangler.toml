@@ -32,6 +32,16 @@ INTERVAL = "15"
 # Secrets are not stored in this file. Set them with:
 #   npx wrangler secret put TOKEN         (private repo: enables download proxying)
 #   npx wrangler secret put GITHUB_TOKEN  (public repo: only raises GitHub's rate limit)
+#
+# When the token expires, GitHub is asked again only every 15 minutes, and
+# requests are answered right away with "no update" (204) or 503. Logs show
+# "GitHub rejected the token". Setting a new token with the command above
+# deploys a new version, which starts over right away.
 
 [observability]
 enabled = true
+
+# Workers Paid plan only: a hard cap on the CPU time of a single request
+# (default 30 seconds). Requests normally need well below 1 ms.
+# [limits]
+# cpu_ms = 100

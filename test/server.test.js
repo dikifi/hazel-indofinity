@@ -1,7 +1,14 @@
 import { describe, it, before, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import worker, { createHandler } from '../lib/index.js'
-import { ACCOUNT, REPOSITORY, mockGitHub, restoreFetch } from './helpers.js'
+import {
+  ACCOUNT,
+  REPOSITORY,
+  age,
+  captureErrors,
+  mockGitHub,
+  restoreFetch
+} from './helpers.js'
 
 const ORIGIN = 'https://updater.example.com'
 const MAC_UA =
@@ -14,16 +21,15 @@ const get = (handler, path, headers = {}) =>
 
 const DOWNLOAD = 'https://github.com/acme/app/releases/download/v1.2.0/'
 
+const publicConfig = { account: ACCOUNT, repository: REPOSITORY, retryDelay: 0 }
+const privateConfig = { ...publicConfig, token: 'secret' }
+
 describe('Server', () => {
   let handler
 
   before(() => {
     mockGitHub()
-    handler = createHandler({
-      account: ACCOUNT,
-      repository: REPOSITORY,
-      retryDelay: 0
-    })
+    handler = createHandler(publicConfig)
   })
 
   afterEach(() => mockGitHub())
@@ -153,21 +159,39 @@ describe('Server', () => {
     assert.equal(post.status, 405)
   })
 
-  it('should answer 500 when GitHub cannot be reached at all', async () => {
-    mockGitHub({ status: 503 })
-    const fresh = createHandler({
-      account: ACCOUNT,
-      repository: REPOSITORY,
-      retryDelay: 0
-    })
-    const originalError = console.error
-    console.error = () => {}
+  it('should answer quickly when GitHub cannot be reached at all', async t => {
+    captureErrors(t)
+    const calls = mockGitHub({ status: 503 })
+    const fresh = createHandler(publicConfig)
 
-    try {
-      assert.equal((await get(fresh, '/update/darwin/1.0.0')).status, 500)
-    } finally {
-      console.error = originalError
-    }
+    assert.equal((await get(fresh, '/update/darwin/1.0.0')).status, 204)
+
+    const download = await get(fresh, '/download/mac')
+    assert.equal(download.status, 503)
+    assert.equal(download.headers.get('Retry-After'), '60')
+
+    assert.equal((await get(fresh, '/')).status, 503)
+    assert.equal((await get(fresh, '/update/win32/1.0.0/RELEASES')).status, 204)
+
+    // Only the first request asked GitHub (once, plus two retries).
+    assert.equal(calls.length, 3)
+  })
+
+  it('should keep offering public downloads cached before GitHub failed', async t => {
+    captureErrors(t)
+    const state = {}
+    mockGitHub(state)
+    const fresh = createHandler(publicConfig)
+    await get(fresh, '/')
+
+    state.status = 401
+    age(fresh.cache)
+
+    const update = await get(fresh, '/update/darwin/1.1.0')
+    assert.equal(
+      (await update.json()).url,
+      DOWNLOAD + 'IndoFinity-1.2.0-mac.zip'
+    )
   })
 })
 
@@ -177,12 +201,7 @@ describe('Server in private repo mode', () => {
 
   before(() => {
     calls = mockGitHub()
-    handler = createHandler({
-      account: ACCOUNT,
-      repository: REPOSITORY,
-      token: 'secret',
-      retryDelay: 0
-    })
+    handler = createHandler(privateConfig)
   })
 
   afterEach(restoreFetch)
@@ -198,11 +217,8 @@ describe('Server in private repo mode', () => {
 
   it('should use URL when it is set', async () => {
     const custom = createHandler({
-      account: ACCOUNT,
-      repository: REPOSITORY,
-      token: 'secret',
-      url: 'https://updater.example.org/',
-      retryDelay: 0
+      ...privateConfig,
+      url: 'https://updater.example.org/'
     })
     calls = mockGitHub()
     const response = await get(custom, '/update/darwin/1.1.0')
@@ -227,5 +243,68 @@ describe('Server in private repo mode', () => {
     assert.equal(assetCall.init.headers.Authorization, 'token secret')
     assert.equal(assetCall.init.headers.Accept, 'application/octet-stream')
     assert.equal(assetCall.init.redirect, 'manual')
+  })
+})
+
+describe('Server in private repo mode with an expired token', () => {
+  afterEach(restoreFetch)
+
+  it('should not offer updates, and contact GitHub once for 1000 requests', async t => {
+    captureErrors(t)
+    const calls = mockGitHub({ status: 401 })
+    const handler = createHandler(privateConfig)
+    const paths = [
+      '/update/darwin/1.1.0',
+      '/update/win32/1.1.0',
+      '/update/win32/1.1.0/RELEASES',
+      '/download/darwin?update=true',
+      '/download',
+      '/'
+    ]
+    const statuses = new Set()
+
+    for (let i = 0; i < 1000; i += 1) {
+      const response = await get(handler, paths[i % paths.length])
+      statuses.add(`${paths[i % paths.length]} ${response.status}`)
+    }
+
+    assert.equal(calls.length, 1)
+    assert.deepEqual([...statuses].sort(), [
+      '/ 503',
+      '/download 503',
+      '/download/darwin?update=true 503',
+      '/update/darwin/1.1.0 204',
+      '/update/win32/1.1.0 204',
+      '/update/win32/1.1.0/RELEASES 204'
+    ])
+  })
+
+  it('should stop offering updates once a download link is refused', async t => {
+    const errors = captureErrors(t)
+    const state = {}
+    const calls = mockGitHub(state)
+    const handler = createHandler(privateConfig)
+
+    // Cached while the token still worked.
+    assert.equal((await get(handler, '/update/darwin/1.1.0')).status, 200)
+
+    // Then the token expires.
+    state.assetStatus = 401
+    const download = await get(handler, '/download/darwin?update=true')
+    assert.equal(download.status, 503)
+    assert.equal(download.headers.get('Retry-After'), '900')
+    assert.match(errors.join('\n'), /token: it has probably expired/)
+
+    const callsAfterRefusal = calls.length
+
+    for (let i = 0; i < 100; i += 1) {
+      assert.equal((await get(handler, '/update/darwin/1.1.0')).status, 204)
+      assert.equal(
+        (await get(handler, '/download/darwin?update=true')).status,
+        503
+      )
+    }
+
+    assert.equal(calls.length, callsAfterRefusal)
   })
 })

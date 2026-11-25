@@ -9,7 +9,7 @@ This fork runs on [Cloudflare Workers](https://workers.cloudflare.com) instead o
 - Refreshes the cache every **15 minutes** (custom interval [possible](#options))
 - When asked for an update, it returns the link to the GitHub asset directly (saves bandwidth)
 - Supports **macOS** and **Windows** apps
-- If GitHub cannot be reached, keeps serving the release it cached last
+- If GitHub fails (e.g. because the token expired), answers right away without contacting GitHub again for a while: see [When GitHub fails](#when-github-fails)
 
 ## Usage
 
@@ -55,6 +55,15 @@ Variables are set in the `[vars]` section of [`wrangler.toml`](wrangler.toml), s
 - `TOKEN` (secret): Your GitHub token (for private repos). Downloads are then sent through this server, which asks GitHub for a download link
 - `GITHUB_TOKEN` (secret): A GitHub token that is only used to raise the API rate limit, for public repos
 - `URL`: The server's public URL, used for download links in private repo mode (defaults to the address the request was sent to)
+
+## When GitHub fails
+
+Requests are always answered right away, and failures do not lead to more requests to GitHub:
+
+- An expired or revoked token (401), missing access (403, 404) or a rate limit: GitHub is not contacted for 15 minutes (or until the rate limit ends, at most an hour). This is shared by all instances of the Worker in a Cloudflare data center.
+- Network errors and GitHub server errors: retried twice, then GitHub is left alone for a minute.
+- In the meantime, `/update` answers `204` (no update) in private repo mode, since download links cannot be requested either, and download routes answer `503` with a `Retry-After` header. In public mode, the release cached before keeps being served.
+- The logs (Workers & Pages → your Worker → Logs) show `GitHub rejected the token` when the token expired. After `npx wrangler secret put TOKEN`, the new version starts over right away.
 
 ## Statistics
 

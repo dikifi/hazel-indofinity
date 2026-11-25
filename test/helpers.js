@@ -43,7 +43,12 @@ export const RELEASES_FILE = tag =>
   `ABCDEF0123456789 IndoFinity-${tag.replace(/^v/, '')}-full.nupkg 87654321`
 
 // Replaces the global fetch with a fake GitHub. `state` can be changed by a
-// test while it runs, e.g. to publish a new release or to make GitHub fail.
+// test while it runs, e.g. to publish a new release or to make GitHub fail:
+//
+// - `status`: every request fails with this status (e.g. 401 for an expired
+//   token), with the extra response `headers`
+// - `assetStatus`: only requests for download links of assets fail
+// - `delay`: milliseconds the list of releases takes to arrive
 export const mockGitHub = (state = {}) => {
   const calls = []
   const releasesUrl = `https://api.github.com/repos/${ACCOUNT}/${REPOSITORY}/releases?`
@@ -55,12 +60,17 @@ export const mockGitHub = (state = {}) => {
     calls.push({ url, init })
 
     if (state.status) {
-      return new Response('{"message":"API rate limit exceeded"}', {
-        status: state.status
+      return new Response('{"message":"Bad credentials"}', {
+        status: state.status,
+        headers: state.headers || {}
       })
     }
 
     if (url.startsWith(releasesUrl)) {
+      if (state.delay) {
+        await new Promise(resolve => setTimeout(resolve, state.delay))
+      }
+
       const perPage = Number(new URL(url).searchParams.get('per_page'))
       return Response.json(state.releases.slice(0, perPage))
     }
@@ -71,6 +81,12 @@ export const mockGitHub = (state = {}) => {
     }
 
     if (url.includes('/releases/assets/')) {
+      if (state.assetStatus) {
+        return new Response('{"message":"Bad credentials"}', {
+          status: state.assetStatus
+        })
+      }
+
       return new Response(null, {
         status: 302,
         headers: { Location: 'https://objects.example.com/signed-download' }
@@ -81,6 +97,20 @@ export const mockGitHub = (state = {}) => {
   }
 
   return calls
+}
+
+// Collects what is logged with console.error instead of printing it.
+export const captureErrors = t => {
+  const messages = []
+  t.mock.method(console, 'error', (...args) => {
+    messages.push(args.map(String).join(' '))
+  })
+  return messages
+}
+
+// Makes the cached release look older than INTERVAL (15 minutes).
+export const age = (cache, minutes = 16) => {
+  cache.lastUpdate -= minutes * 60 * 1000
 }
 
 export const restoreFetch = () => {
